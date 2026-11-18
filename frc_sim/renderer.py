@@ -46,6 +46,7 @@ class Renderer:
     def rebuild(self, state: Scene) -> None:
         static = state.model_copy(deep=True)
         for piece in static.pieces:
+            piece.gamepiece = None  # Placement metadata does not change the GPU mesh.
             piece.position = (0, 0, 0)
             piece.rotation = (0, 0, 0)
         signature = static.model_dump_json(exclude={'robot_xy_heading', 'calibration', 'distortion',
@@ -152,6 +153,30 @@ class RenderService:
         if self.renderer is None:
             self.renderer = Renderer()
         return self.renderer.render(state, preview, inspection)
+
+    def field_map(self, state: Scene, width: int, height: int) -> NDArray[np.uint8]:
+        if self.renderer is None:
+            self.renderer = Renderer()
+        renderer = self.renderer
+        background = state.model_copy(deep=True)
+        background.pieces = []
+        renderer.rebuild(background)
+        config = FieldConfig.model_validate_json((Path(state.field_dir)/'config.json').read_text())
+        w, h = config.widthInches*.0254, config.heightInches*.0254
+        camera = renderer.scene.add_camera('field-map', width, height, 1, .02, 100)
+        try:
+            camera.set_orthographic_parameters(.02, 100, -w/2, w/2, -h/2, h/2)
+            # Camera forward is -world Z, camera left is -world X, camera up is +world Y.
+            pose = np.eye(4)
+            pose[:3, :3] = np.array([[0, -1, 0], [0, 0, 1], [-1, 0, 0]])
+            pose[:3, 3] = (w/2, h/2, 20)
+            camera.entity.set_pose(renderer.api.Pose(pose))
+            renderer.scene.update_render()
+            camera.take_picture()
+            rgb = np.asarray(camera.get_picture('Color'))[..., :3]
+            return (np.clip(rgb, 0, 1)*255).astype(np.uint8)
+        finally:
+            renderer.scene.remove_camera(camera)
 
     def export(self, state: Scene, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)

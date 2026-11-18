@@ -43,7 +43,16 @@ class Calibration(Record):
     intrinsics: Intrinsics
 
 
+class GamepiecePlacement(Record):
+    """Tilts in the import-corrected frame; theta is CCW field yaw in degrees."""
+    upright_tilt: tuple[float, float] = (0, 0)
+    fallen_tilt: tuple[float, float] = (0, 90)
+    stance: Literal['upright', 'fallen'] = 'upright'
+    theta: float = 0
+
+
 class Piece(Record):
+    gamepiece: GamepiecePlacement | None = None
     name: str
     path: str
     position: Vec3 = (2, 2, 0)
@@ -59,7 +68,7 @@ DEFAULT_CONE_PATH = "2023ChargedUpConeChopped.glb"
 def default_cone() -> Piece:
     """User cone: meters, tip along -Z, base underside at source Z=+0.0127."""
     return Piece(name="Chopped cone", path=DEFAULT_CONE_PATH,
-                 position=(4, 4, 0.0127), import_rotation=(180, 0, 0))
+                 position=(4, 4, 0.0127), import_rotation=(180, 0, 0), gamepiece=GamepiecePlacement())
 
 
 class Light(Record):
@@ -73,10 +82,21 @@ class Light(Record):
     outer_degrees: Annotated[float, Field(gt=0, lt=179)] = 60
 
 
+def default_calibration() -> Calibration:
+    # frc971/cos constants/second_bot/left_camera.json, retrieved 2026-11-18.
+    return Calibration(width=1280, height=800,
+        extrinsics=Extrinsics(translation_x=.2897, translation_y=.3608, translation_z=.3434,
+                             rotation_x=0, rotation_y=-15, rotation_z=45),
+        intrinsics=Intrinsics(fx=901.1890743775721, fy=901.0617429863127,
+            cx=637.5288620693618, cy=419.4641386227522, k1=.03863073515655131,
+            k2=-.07808454691737804, k3=.02727197961030114,
+            p1=.0033423455589040776, p2=.00036377102345917046))
+
+
 class Scene(Record):
     version: Literal[1] = 1
     field_dir: str = "assets/field"
-    calibration: Calibration | None = None
+    calibration: Calibration | None = Field(default_factory=default_calibration)
     robot_xy_heading: Vec3 = (2, 4, 0)
     pieces: list[Piece] = Field(default_factory=lambda: [default_cone()])
     lights: list[Light] = Field(default_factory=lambda: [Light()])
@@ -91,6 +111,8 @@ class Scene(Record):
 def load_scene(path: Path) -> Scene:
     """Resolve asset paths relative to the scene document, never the shell cwd."""
     scene = Scene.model_validate_json(path.read_text())
+    if scene.calibration is None:
+        scene.calibration = default_calibration()
     scene.field_dir = str((path.parent / scene.field_dir).resolve())
     for piece in scene.pieces:
         piece.path = str((path.parent / piece.path).resolve())

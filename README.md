@@ -31,14 +31,14 @@ New scenes and **Add cone** use `2023ChargedUpConeChopped.glb` from the reposito
 
 ## Using the viewer
 
-1. Start in **Inspect** to see the field. Drag the image to orbit; change the target coordinates to pan and distance to zoom.
-2. Add your chopped cone or the provided cube, upload GLB/STL files, or enter an existing server model path. Select an instance to edit its position and roll/pitch/yaw. Duplicate/remove controls act on the selected instance.
-3. GLB units default to meters; its node hierarchy is retained. For STL exported in millimeters set scale to `0.001`; for inches use `0.0254`. Import rotations correct source axes before applying the object's scene rotation. Position is the imported model origin, not an automatically inferred ground contact. Nothing is settled by physics.
-4. Upload a combined camera JSON like `frc971/cos/constants/vision-bot/front.json`. Choose **Robot camera**, then edit robot X/Y/heading. Camera mounting remains fixed relative to the robot.
-5. Adjust ambient light and add/edit directional, point, or spot lights. Directions must be nonzero; spot inner angles must not exceed outer angles. Shadows use rasterized shadow maps, not ray tracing.
-6. Export a calibrated PNG and accompanying scene JSON. Inspection view changes do not affect this export. Save/load scenes using server JSON paths; move associated assets with their relative references if transferring a scene elsewhere.
+1. **Drive** opens directly in the left robot camera. Click the image to focus, then hold **W/S** to drive forward/backward, **A/D** to strafe left/right, and **Q/E** to turn counterclockwise/clockwise. Movement follows the robot heading. Speed sliders use meters/second and degrees/second. Leaving the image focus stops movement.
+2. Switch to **Scene editor** for the top-down field. Choose Cone, Cube, or Selected gamepiece, then click carpet to place an instance. Click/drag existing markers to select/move them; drag the direction handle to change theta. The blue marker and handle edit the robot's starting pose.
+3. Choose **upright** or **fallen** for the selected gamepiece. Theta is counterclockwise ground yaw from field +X. The two tilt presets and import corrections are asset metadata, not viewer controls. Placement computes carpet contact from transformed mesh vertices, without physics.
+4. Upload GLB/STL models or enter a server model path. Enable **Tagged gamepiece** to use the same placement workflow for imported assets. Configure source-axis corrections, tilt presets, and unit scale in the scene JSON when needed.
+5. Gamepiece controls are limited to X/Y, theta, and Upright/Down. Camera mounting and lighting have their own sliders in the editor. New scenes automatically use the 1280×800 calibration and mounting pose from [frc971/cos left_camera.json](https://github.com/frc971/cos/blob/main/constants/second_bot/left_camera.json), bundled locally so startup works offline. Explicit saved or uploaded calibrations are retained.
+6. Export a calibrated PNG and accompanying scene JSON. Save/load scenes using server JSON paths; keep referenced assets alongside their relative paths when transferring scenes.
 
-Upright/fallen buttons are stubs and display a notification without changing placement. Manual rotation is available. Preview images are compressed JPEG; exported RGB PNGs are lossless and use the calibration's original dimensions. Changes request previews at up to 15 Hz; actual speed depends on GPU, model complexity, transfer time, and shadow lighting. No idle frames are rendered.
+Preview uses compressed JPEG at up to 15 Hz; actual speed depends on the GPU and scene. Exported PNG uses full calibration resolution. The top-down editor uses an orthographic rendering of the field with selectable overlays. Driving does not simulate collisions.
 
 ## Calibration and coordinate conventions
 
@@ -73,7 +73,7 @@ Save a scene in the browser, then render without starting the browser server:
 ./.venv/bin/python -m frc_sim render --scene runtime/scene.json --output runtime/example.png
 ```
 
-JSON asset paths are relative to the JSON file. Exports embed the effective calibration, object transforms, lights, robot pose, and distortion setting. The matching PNG and JSON share a basename. Rendering neither simulates exposure nor copies acquisition FPS into a physical simulation. Upright/fallen settling, physics, batch datasets, depth/masks, and STEP conversion are not implemented.
+JSON asset paths are relative to the JSON file. Exports embed the effective calibration, object transforms, lights, robot pose, and distortion setting. The matching PNG and JSON share a basename. Rendering neither simulates exposure nor copies acquisition FPS into a physical simulation. Physics settling, batch datasets, depth/masks, and STEP conversion are not implemented.
 
 `assets/field` links to `/mnt/ssd2/data/frc_sim/2023-field-v5`. A new `runtime` link points to a unique folder under `/mnt/ssd2/tmp_outputs/` on first launch. Uploads, cleaned field caches, and default exports go there. Keep the target folder if you want its saved scenes to remain usable; downloads do not bundle referenced assets.
 
