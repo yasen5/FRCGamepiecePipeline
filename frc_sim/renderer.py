@@ -1,0 +1,160 @@
+"""SAPIEN boundary. Its incomplete extension stubs require localized Any handles."""
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+from numpy.typing import NDArray
+from PIL import Image
+from pydantic import BaseModel
+
+from .camera import camera_pose, inspection_pose, projection, transform
+from .model import Scene, scene_json
+
+
+class FieldRotation(BaseModel):
+    axis: str
+    degrees: float
+
+
+class FieldPiece(BaseModel):
+    stagedObjects: list[str] = []
+
+
+class FieldConfig(BaseModel):
+    widthInches: float
+    heightInches: float
+    rotations: list[FieldRotation]
+    gamePieces: list[FieldPiece] = []
+
+
+class Renderer:
+    def __init__(self) -> None:
+        # SAPIEN/pybind handles stay within this adapter, never serialized or used as domain data.
+        import sapien
+        self.api: Any = sapien
+        # 3.0.3 renders offscreen without constructing a Viewer or window.
+        self.scene: Any = None
+        self.signature = ''
+        self.actors: list[Any] = []
+        self.camera: Any = None
+        self.camera_size = (0, 0)
+
+    def rebuild(self, state: Scene) -> None:
+        static = state.model_copy(deep=True)
+        for piece in static.pieces:
+            piece.position = (0, 0, 0)
+            piece.rotation = (0, 0, 0)
+        signature = static.model_dump_json(exclude={'robot_xy_heading', 'calibration', 'distortion',
+                                                  'inspect_target', 'inspect_yaw', 'inspect_pitch', 'inspect_distance'})
+        if signature == self.signature:
+            return
+        self.scene = self.api.Scene()
+        self.camera = None
+        self.camera_size = (0, 0)
+        self.actors = []
+        root = Path(state.field_dir)
+        config = FieldConfig.model_validate_json((root / 'config.json').read_text())
+        field_pose = transform((config.widthInches*.0254/2, config.heightInches*.0254/2, 0), (0, 0, 180))
+        for rotation in config.rotations:
+            angles = [0., 0., 0.]
+            angles[['x', 'y', 'z'].index(rotation.axis)] = rotation.degrees
+            field_pose = field_pose @ transform((0, 0, 0), (angles[0], angles[1], angles[2]))
+        # Remove staged objects by GLB node name while preserving scene hierarchy/materials.
+        import hashlib
+        cache = Path('runtime') / ('field-' + hashlib.sha256(
+            (root / 'model.glb').read_bytes() + (root / 'config.json').read_bytes()).hexdigest()[:16] + '.glb')
+        if not cache.exists():
+            import trimesh
+            model = trimesh.load_scene(str(root / 'model.glb'))
+            staged = {name for piece in config.gamePieces for name in piece.stagedObjects}
+            for node in list(model.graph.nodes_geometry):
+                if node in staged:
+                    model.graph.transforms.remove_node(node)
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            model.export(str(cache))
+        self.add_mesh(cache, field_pose, 1, None)
+        for piece in state.pieces:
+            self.add_mesh(Path(piece.path), transform(piece.position, piece.rotation) @
+                          transform((0, 0, 0), piece.import_rotation), piece.scale,
+                          piece.color if Path(piece.path).suffix.lower() == '.stl' else None)
+        self.scene.set_ambient_light(state.ambient)
+        for light in state.lights:
+            if light.kind != 'point' and np.linalg.norm(light.direction) < 1e-8:
+                raise ValueError('Light direction must be nonzero')
+            color = [v*light.intensity for v in light.color]
+            common = dict(shadow=light.shadow, shadow_near=.02, shadow_far=60)
+            if light.kind == 'directional':
+                self.scene.add_directional_light(light.direction, color, position=light.position, shadow_scale=25, **common)
+            elif light.kind == 'point':
+                self.scene.add_point_light(light.position, color, **common)
+            else:
+                if light.inner_degrees > light.outer_degrees:
+                    raise ValueError('Spotlight inner angle must not exceed outer angle')
+                self.scene.add_spot_light(light.position, light.direction,
+                                         np.deg2rad(light.inner_degrees), np.deg2rad(light.outer_degrees), color, **common)
+        self.signature = signature
+
+    def add_mesh(self, path: Path, pose: NDArray[np.float64], scale: float,
+                 color: tuple[float, float, float] | None) -> None:
+        if path.suffix.lower() not in {'.glb', '.stl'} or not path.is_file():
+            raise ValueError(f'Expected an existing GLB/STL: {path}')
+        builder = self.scene.create_actor_builder()
+        material = None
+        if color is not None:
+            material = self.api.render.RenderMaterial()
+            material.base_color = [*color, 1]
+        builder.add_visual_from_file(str(path), scale=[scale]*3, material=material)
+        actor = builder.build_kinematic()
+        actor.set_pose(self.api.Pose(pose))
+        self.actors.append(actor)
+
+    def render(self, state: Scene, preview: bool = False, inspection: bool = False) -> NDArray[np.uint8]:
+        self.rebuild(state)
+        for actor, piece in zip(self.actors[1:], state.pieces):
+            actor.set_pose(self.api.Pose(transform(piece.position, piece.rotation) @
+                                         transform((0, 0, 0), piece.import_rotation)))
+        if inspection:
+            from .camera import Projection
+            p = Projection(960, 540, 700, 700, 480, 270)
+            pose = inspection_pose(state)
+        else:
+            if state.calibration is None:
+                raise ValueError('Load a combined camera JSON to render the robot camera')
+            p = projection(state.calibration.model_dump_json(), preview, state.distortion)
+            pose = camera_pose(state)
+        if self.camera_size != (p.width, p.height):
+            if self.camera is not None:
+                self.scene.remove_camera(self.camera)
+            self.camera = self.scene.add_camera('output', p.width, p.height, 1, .02, 100)
+            self.camera_size = (p.width, p.height)
+        self.camera.set_perspective_parameters(.02, 100, p.fx, p.fy, p.cx, p.cy, 0)
+        self.camera.entity.set_pose(self.api.Pose(pose))
+        self.scene.update_render()
+        self.camera.take_picture()
+        frame = np.asarray(self.camera.get_picture('Color'))[..., :3]
+        rgb = (np.clip(frame, 0, 1)*255).astype(np.uint8)
+        if p.map_x is not None and p.map_y is not None:
+            rgb = cv2.remap(rgb, p.map_x, p.map_y, cv2.INTER_LINEAR)
+        return np.asarray(rgb, dtype=np.uint8)
+
+
+class RenderService:
+    """One worker owns all GPU state; browser awaits each frame before requesting another."""
+    def __init__(self) -> None:
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sapien')
+        self.renderer: Renderer | None = None
+
+    def render(self, state: Scene, preview: bool = False, inspection: bool = False) -> NDArray[np.uint8]:
+        if self.renderer is None:
+            self.renderer = Renderer()
+        return self.renderer.render(state, preview, inspection)
+
+    def export(self, state: Scene, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(self.render(state)).save(destination)
+        destination.with_suffix('.json').write_text(scene_json(state, destination.with_suffix('.json')))
+        return destination
