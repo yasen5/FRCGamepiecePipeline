@@ -60,6 +60,8 @@ def main() -> None:
     generate.add_argument('--seed', type=int)
     generate.add_argument('--min-visible', '--min_visible', type=int, default=0,
                           help='Minimum gamepieces with a visible majority of points in every left-camera view')
+    generate.add_argument('--max-distance', type=float, metavar='METERS',
+                          help='Maximum XY distance from the left camera to a counted gamepiece center')
     generate.add_argument('--output', type=Path, help='New output directory (default: fresh directory under runtime)')
     batch_render = commands.add_parser('render-layouts', help='Render all robot poses in generated layouts')
     batch_render.add_argument('--layouts', type=Path, required=True)
@@ -80,7 +82,7 @@ def main() -> None:
             options = LayoutOptions(batch_size=args.batch_size, num_batches=args.num_batches,
                                     piece_count_mean=args.piece_count_mean, piece_count_std=args.piece_count_std,
                                     robot_length=args.robot_length, robot_width=args.robot_width, seed=args.seed,
-                                    min_visible=args.min_visible)
+                                    min_visible=args.min_visible, max_distance=args.max_distance)
             runtime = _runtime()
             destination = args.output or runtime / f'gamepiece-layouts-{uuid4().hex}'
             print(generate_layouts(options, load_geometry(runtime), destination, keypoints))

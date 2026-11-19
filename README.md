@@ -104,14 +104,23 @@ Positions are in meters in the blue-origin field frame. Gamepiece angles are rol
 
 The piece count is a rounded normal draw clamped to zero, controlled by `--piece-count-mean` (8) and `--piece-count-std` (3). Piece types and upright/fallen stances are sampled independently with equal probability. The robot footprint defaults to 0.8 × 0.8 m including bumpers. Set `--robot-length` and `--robot-width` for a different robot. Poses must clear the gamepieces, field boundary, and conservative static obstacle bounds. The first run caches field bounds and piece contact heights under `runtime/`. Subsequent runs reuse that cache without loading meshes.
 
-To require at least two pieces in every left COS camera view and render the resulting layouts:
+To require at least two pieces in every left COS camera view, run the generator with `--min-visible 2`.
 
 ```sh
 ./.venv/bin/python -m frc_sim generate-layouts --batch-size 5 --num-batches 10 --min-visible 2 --seed 2023 --output runtime/cos-left-layouts
+```
+
+`--min-visible` defaults to zero. For a gamepiece to count, a strict majority of its points must project inside the calibrated left-camera image and clear the conservative occlusion bounds of field objects and other gamepieces. By default each gamepiece has one point at the center of its mesh-local bounding box. With `--max-distance METERS`, a piece counts only if its geometric center is within that XY distance of the left camera, including when named landmarks are used. Omit the flag for uncapped visibility.
+
+## Batch render generated layouts
+
+From the repository root, pass the directory printed by `generate-layouts` to `--layouts` and a new directory to `--output`.
+
+```sh
 ./.venv/bin/python -m frc_sim render-layouts --layouts runtime/cos-left-layouts --output runtime/cos-left-renders
 ```
 
-`--min-visible` defaults to zero. For a gamepiece to count, a strict majority of its points must project inside the calibrated left-camera image and clear the conservative occlusion bounds of field objects and other gamepieces. By default each gamepiece has one point at the center of its mesh-local bounding box. The renderer writes `batch_0/layout.json`, `batch_0/frame_0.png`, and matching scene JSON sidecars, with one numbered directory per layout.
+The renderer produces one image per robot pose. It writes `layout.json`, images such as `frame_0.png`, and matching scene JSON sidecars in numbered directories such as `batch_0`.
 
 ## Keypoint annotations
 

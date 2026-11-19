@@ -61,10 +61,13 @@ class LayoutOptions:
     robot_width: float = .8
     seed: int | None = None
     min_visible: int = 0
+    max_distance: float | None = None
 
     def __post_init__(self) -> None:
         if self.min_visible < 0:
             raise ValueError('Minimum visible gamepieces must be nonnegative')
+        if self.max_distance is not None and (not isfinite(self.max_distance) or self.max_distance < 0):
+            raise ValueError('--max-distance must be finite and nonnegative')
         if self.batch_size < 1 or self.num_batches < 1:
             raise ValueError('Batch size and number of batches must be positive')
         for value in (self.robot_length, self.robot_width):
@@ -204,7 +207,8 @@ def _vec3(values: NDArray[np.float64]) -> Vec3:
 
 
 def layout_visibility(geometry: LayoutGeometry, gamepieces: list[GamepiecePose],
-                      keypoints: LayoutKeypoints | None = None) -> LeftCameraVisibility:
+                      keypoints: LayoutKeypoints | None = None, *,
+                      max_distance: float | None = None) -> LeftCameraVisibility:
     targets: list[SightTarget] = []
     for piece in gamepieces:
         footprints = geometry.cone_footprints if piece.kind == 'cone' else geometry.cube_footprints
@@ -212,15 +216,17 @@ def layout_visibility(geometry: LayoutGeometry, gamepieces: list[GamepiecePose],
         pose = transform(piece.position, (0, 0, piece.rotation[2]))
         rotation, translation = pose[:3, :3], pose[:3, 3]
         low, high = np.asarray(footprint.bounds, dtype=np.float64)
-        center = (low + high) / 2 @ rotation.T + translation
+        bounds_center = (low + high) / 2 @ rotation.T + translation
         half_extent = (high - low) / 2 @ np.abs(rotation).T
         canonical_center = geometry.cone_center if piece.kind == 'cone' else geometry.cube_center
-        canonical_points = ([canonical_center] if keypoints is None
-                            else [point.position for point in keypoints.for_kind(piece.kind)])
+        canonical_points = [canonical_center]
+        if keypoints is not None:
+            canonical_points.extend(point.position for point in keypoints.for_kind(piece.kind))
         correction = default_cone().import_rotation if piece.kind == 'cone' else CUBE_IMPORT_ROTATION
         points = world_points(canonical_points, piece.position, piece.rotation, correction)
-        targets.append(SightTarget(points, (_vec3(center - half_extent), _vec3(center + half_extent))))
-    return LeftCameraVisibility(geometry.occluders, targets)
+        bounds = (_vec3(bounds_center - half_extent), _vec3(bounds_center + half_extent))
+        targets.append(SightTarget(points if keypoints is None else points[1:], bounds, _vec3(points[0])))
+    return LeftCameraVisibility(geometry.occluders, targets, max_distance=max_distance)
 
 
 def _sample_batch(index: int, options: LayoutOptions, geometry: LayoutGeometry,
@@ -266,7 +272,9 @@ def _sample_arrangement(index: int, count: int, options: LayoutOptions, geometry
         else:
             raise ValueError(f'Batch {index}: could not place gamepiece {item} of {count}')
 
-    visibility = layout_visibility(geometry, gamepieces, keypoints) if options.min_visible else None
+    visibility = None
+    if options.min_visible:
+        visibility = layout_visibility(geometry, gamepieces, keypoints, max_distance=options.max_distance)
     robot_poses: list[Vec3] = []
     for pose_index in range(1, options.batch_size + 1):
         for _ in range(MAX_ATTEMPTS):

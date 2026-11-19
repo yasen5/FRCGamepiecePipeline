@@ -9,9 +9,9 @@ import pytest
 import trimesh
 
 from frc_sim.camera import camera_pose
-from frc_sim.keypoints import LayoutKeypoints
-from frc_sim.layouts import LayoutBatch, LayoutOptions, generate_layouts, layout_visibility, load_geometry
-from frc_sim.model import Keypoint, Scene
+from frc_sim.keypoints import LayoutKeypoints, world_points
+from frc_sim.layouts import CUBE_IMPORT_ROTATION, LayoutBatch, LayoutOptions, generate_layouts, layout_visibility, load_geometry
+from frc_sim.model import Keypoint, Scene, default_cone
 
 
 def test_layout_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,7 +92,8 @@ def test_layout_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(counts) > 1
     assert variants == {('cone', 0), ('cone', 90), ('cube', 0), ('cube', 90)}
 
-    visible_options = LayoutOptions(5, num_batches=2, seed=73, min_visible=2)
+    max_distance = 5.
+    visible_options = LayoutOptions(5, num_batches=2, seed=73, min_visible=2, max_distance=max_distance)
     landmarks = LayoutKeypoints(
         cone=[Keypoint(name='top', position=(0, 0, -.35)),
               *[Keypoint(name='corner', position=(x, y, .05)) for x in (-.1, .1) for y in (-.1, .1)]],
@@ -103,8 +104,17 @@ def test_layout_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     for document in sorted(visible.glob('*.json')):
         assert document.read_bytes() == (repeated / document.name).read_bytes()
         batch = LayoutBatch.model_validate_json(document.read_bytes())
-        visibility = layout_visibility(warm, batch.gamepieces, landmarks)
+        visibility = layout_visibility(warm, batch.gamepieces, landmarks, max_distance=max_distance)
         assert all(visibility.meets_minimum(pose, 2) for pose in batch.robot_poses)
+        centers = [
+            world_points([warm.cone_center], piece.position, piece.rotation, default_cone().import_rotation)[0]
+            if piece.kind == 'cone'
+            else world_points([warm.cube_center], piece.position, piece.rotation, CUBE_IMPORT_ROTATION)[0]
+            for piece in batch.gamepieces
+        ]
+        for pose in batch.robot_poses:
+            x, y = camera_pose(Scene(robot_xy_heading=pose))[:2, 3]
+            assert sum(hypot(center[0] - x, center[1] - y) <= max_distance for center in centers) >= 2
 
     empty_dir = generate_layouts(LayoutOptions(1, piece_count_mean=0, piece_count_std=0, seed=73),
                                  geometry, tmp_path / 'empty')
@@ -127,7 +137,7 @@ def test_left_camera_visibility() -> None:
         point = camera[:3, :3] @ np.array([forward, left, up]) + camera[:3, 3]
         x, y, z = (float(v) for v in point)
         return SightTarget(point.reshape(1, 3), ((x - .05, y - .05, z - .05),
-                                                  (x + .05, y + .05, z + .05)))
+                                                  (x + .05, y + .05, z + .05)), (x, y, z))
 
     near, far = target(2, 0, 0), target(4, 0, 0)
     outside = [target(-2, 0, 0), target(4, 3, 0), target(4, 0, 2)]
@@ -138,10 +148,16 @@ def test_left_camera_visibility() -> None:
     assert LeftCameraVisibility([], [near, target(4, 1, 0)]).meets_minimum(pose, 2)
     in_frame = [target(4, side, 0).points for side in (0, .25, .5, .75, 1)]
     clipped = [target(4, 4, height).points for height in (0, .25, .5, .75)]
-    four = SightTarget(np.concatenate(in_frame[:4] + clipped), far.bounds)
-    five = SightTarget(np.concatenate(in_frame + clipped[:3]), far.bounds)
+    four = SightTarget(np.concatenate(in_frame[:4] + clipped), far.bounds, far.center)
+    five = SightTarget(np.concatenate(in_frame + clipped[:3]), far.bounds, far.center)
     assert not LeftCameraVisibility([], [four]).meets_minimum(pose, 1)
     assert LeftCameraVisibility([], [five]).meets_minimum(pose, 1)
     assert not LeftCameraVisibility([], [near, five]).meets_minimum(pose, 2)
+    x, y, z = camera[:3, 3]
+    cx, cy, cz = five.center
+    distance = hypot(cx - x, cy - y)
+    assert cz != z
+    assert LeftCameraVisibility([], [five], max_distance=distance).meets_minimum(pose, 1)
+    assert not LeftCameraVisibility([], [five], max_distance=distance - .01).meets_minimum(pose, 1)
     with pytest.raises(ValueError, match='fixed gamepiece count'):
         LayoutOptions(5, piece_count_mean=1, piece_count_std=0, min_visible=2)

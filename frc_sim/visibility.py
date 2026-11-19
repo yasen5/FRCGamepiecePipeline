@@ -1,5 +1,6 @@
 """Conservative line-of-sight checks for the fixed left COS camera."""
 from dataclasses import dataclass
+from math import hypot
 
 import numpy as np
 
@@ -13,6 +14,7 @@ Bounds3D = tuple[Vec3, Vec3]
 class SightTarget:
     points: Matrix
     bounds: Bounds3D
+    center: Vec3
 
 
 def _blocked(origin: Matrix, target: Matrix, bounds: Matrix) -> bool:
@@ -32,9 +34,12 @@ def _blocked(origin: Matrix, target: Matrix, bounds: Matrix) -> bool:
 
 
 class LeftCameraVisibility:
-    def __init__(self, obstacles: list[Bounds3D], targets: list[SightTarget]) -> None:
+    def __init__(self, obstacles: list[Bounds3D], targets: list[SightTarget], *,
+                 max_distance: float | None = None) -> None:
         self.calibration = default_calibration()
         self.projector = ImageProjector(self.calibration, distorted=True)
+        self.max_distance = max_distance
+        self.centers = [target.center for target in targets]
         self.required = [len(target.points) // 2 + 1 for target in targets]
         self.points = np.concatenate([target.points for target in targets]) if targets else np.empty((0, 3))
         self.indices = np.repeat(np.arange(len(targets)), np.array([len(target.points) for target in targets], dtype=np.intp))
@@ -50,6 +55,10 @@ class LeftCameraVisibility:
         layout_indices = self.indices[in_frame]
         visible = 0
         for index in np.unique(layout_indices):
+            if self.max_distance is not None:
+                x, y, _ = self.centers[index]
+                if hypot(x - origin[0], y - origin[1]) > self.max_distance:
+                    continue
             candidates = in_frame[layout_indices == index]
             required = self.required[index]
             if candidates.size < required:
