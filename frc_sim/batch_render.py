@@ -3,12 +3,14 @@ from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
 
+from .camera import ImageProjector
+from .keypoints import KeypointManifest, LayoutKeypoints, PieceKind, SceneLandmarks
 from .layouts import CUBE_IMPORT_ROTATION, LayoutBatch
 from .model import GamepiecePlacement, Piece, Scene, default_calibration, default_cone
 from .renderer import RenderService
 
 
-def render_layouts(source: Path, output: Path) -> Path:
+def render_layouts(source: Path, output: Path, keypoints: LayoutKeypoints | None = None) -> Path:
     if output.exists() or output.is_symlink():
         raise FileExistsError(f'Output directory already exists: {output}')
     if not source.is_dir():
@@ -24,6 +26,17 @@ def render_layouts(source: Path, output: Path) -> Path:
         except ValueError as error:
             raise ValueError(f'Invalid layout {path}: {error}') from error
 
+    classes = ['center']
+    if keypoints is not None:
+        kinds: set[PieceKind] = {item.kind for batch in batches for item in batch.gamepieces}
+        for kind in sorted(kinds):
+            keypoints.for_kind(kind)
+        classes = sorted({point.name for points in (keypoints.cone, keypoints.cube)
+                          for point in points or ()})
+    manifest = KeypointManifest(classes=classes, images=[])
+    class_ids = {name: index for index, name in enumerate(classes)}
+    calibration = default_calibration()
+    projector = ImageProjector(calibration, distorted=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     service = RenderService()
     try:
@@ -41,11 +54,18 @@ def render_layouts(source: Path, output: Path) -> Path:
                     piece.rotation = item.rotation
                     piece.gamepiece = GamepiecePlacement(theta=item.rotation[2],
                                                          stance='fallen' if item.rotation[1] == 90 else 'upright')
+                    if keypoints is not None:
+                        piece.keypoints = keypoints.for_kind(item.kind)
                     pieces.append(piece)
-                scene = Scene(calibration=default_calibration(), pieces=pieces)
+                scene = Scene(calibration=calibration, pieces=pieces)
+                landmarks = SceneLandmarks.from_scene(scene, named=keypoints is not None)
                 for frame, pose in enumerate(batch.robot_poses):
                     scene.robot_xy_heading = pose
-                    service.executor.submit(service.export, scene, directory / f'frame_{frame}.png').result()
+                    destination = directory / f'frame_{frame}.png'
+                    service.executor.submit(service.export, scene, destination).result()
+                    manifest.images.append(landmarks.annotate(
+                        scene, projector, destination.relative_to(staging).as_posix(), class_ids))
+            manifest.write(staging / 'keypoints.json')
             staging.rename(output)
     finally:
         service.executor.shutdown()

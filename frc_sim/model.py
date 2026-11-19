@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, StringConstraints
 
 Vec3 = tuple[float, float, float]
 
@@ -51,6 +51,12 @@ class GamepiecePlacement(Record):
     theta: float = 0
 
 
+class Keypoint(Record):
+    """A canonical asset-local landmark in meters."""
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    position: Vec3
+
+
 class Piece(Record):
     gamepiece: GamepiecePlacement | None = None
     name: str
@@ -60,9 +66,16 @@ class Piece(Record):
     import_rotation: Vec3 = (0, 0, 0)
     scale: PositiveFloat = 1
     color: Vec3 = (0.8, 0.65, 0.1)
+    keypoints: list[Keypoint] = Field(default_factory=list)
 
 
 DEFAULT_CONE_PATH = "2023ChargedUpConeChopped.glb"
+
+
+def stock_gamepiece_paths(field_dir: str) -> set[Path]:
+    root = Path(field_dir)
+    return {Path(DEFAULT_CONE_PATH).resolve(), (root / 'model_0.glb').resolve(),
+            (root / 'model_1.glb').resolve()}
 
 
 def default_cone() -> Piece:

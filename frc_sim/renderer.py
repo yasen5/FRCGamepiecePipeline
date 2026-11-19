@@ -11,9 +11,9 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
-from .camera import camera_pose, inspection_pose, projection, transform
+from .camera import CAMERA_FAR, CAMERA_NEAR, camera_pose, inspection_pose, piece_transform, projection
 from .field import FieldConfig
-from .model import DEFAULT_CONE_PATH, GamepiecePlacement, Scene, Vec3, scene_json
+from .model import GamepiecePlacement, Scene, Vec3, scene_json, stock_gamepiece_paths
 
 
 class Renderer:
@@ -31,8 +31,7 @@ class Renderer:
 
     def rebuild(self, state: Scene) -> None:
         root = Path(state.field_dir)
-        stock_gamepieces = {Path(DEFAULT_CONE_PATH).resolve(), (root / 'model_0.glb').resolve(),
-                            (root / 'model_1.glb').resolve()}
+        stock_gamepieces = stock_gamepiece_paths(state.field_dir)
         matte_pieces = [piece.gamepiece is not None or Path(piece.path).resolve() in stock_gamepieces
                         for piece in state.pieces]
         static = state.model_copy(deep=True)
@@ -41,6 +40,7 @@ class Renderer:
             piece.gamepiece = GamepiecePlacement() if matte else None
             piece.position = (0, 0, 0)
             piece.rotation = (0, 0, 0)
+            piece.keypoints = []
         signature = static.model_dump_json(exclude={'robot_xy_heading', 'calibration', 'distortion',
                                                   'inspect_target', 'inspect_yaw', 'inspect_pitch', 'inspect_distance', 'render_settings'})
         if signature == self.signature:
@@ -83,8 +83,7 @@ class Renderer:
         self.add_mesh(cache, field_pose, 1, None)
         for piece, matte in zip(state.pieces, matte_pieces):
             path = Path(piece.path)
-            self.add_mesh(path, transform(piece.position, piece.rotation) @
-                          transform((0, 0, 0), piece.import_rotation), piece.scale,
+            self.add_mesh(path, piece_transform(piece.position, piece.rotation, piece.import_rotation), piece.scale,
                           piece.color if path.suffix.lower() == '.stl' else None, matte=matte)
         self.scene.set_ambient_light(state.ambient)
         for light in state.lights:
@@ -149,7 +148,7 @@ class Renderer:
         entity.name = name
         entity.add_component(camera)
         self.scene.add_entity(entity)
-        camera.near, camera.far = .02, 100
+        camera.near, camera.far = CAMERA_NEAR, CAMERA_FAR
         return camera
 
     def render(self, state: Scene, preview: bool = False, inspection: bool = False) -> NDArray[np.uint8]:
@@ -161,7 +160,7 @@ class Renderer:
         if poses != self.piece_poses:
             for actor, piece, pose, previous in zip(self.actors[1:], state.pieces, poses, self.piece_poses):
                 if pose != previous:
-                    actor.set_pose(self.api.Pose(transform(*pose) @ transform((0, 0, 0), piece.import_rotation)))
+                    actor.set_pose(self.api.Pose(piece_transform(*pose, piece.import_rotation)))
             self.piece_poses = poses
         if inspection:
             from .camera import Projection
@@ -177,7 +176,7 @@ class Renderer:
                 self.scene.remove_camera(self.camera)
             self.camera = self.add_camera('output', p.width, p.height, 'rt')
             self.camera_size = (p.width, p.height)
-        self.camera.set_perspective_parameters(.02, 100, p.fx, p.fy, p.cx, p.cy, 0)
+        self.camera.set_perspective_parameters(CAMERA_NEAR, CAMERA_FAR, p.fx, p.fy, p.cx, p.cy, 0)
         self.camera.entity.set_pose(self.api.Pose(pose))
         self.scene.update_render()
         self.camera.take_picture()

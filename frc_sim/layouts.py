@@ -1,7 +1,6 @@
 """Generate compact JSON layouts in blue-origin field coordinates."""
 from dataclasses import dataclass
 from hashlib import sha256
-from itertools import product
 from math import cos, isfinite, radians, sin
 from pathlib import Path
 from random import Random
@@ -14,10 +13,10 @@ from pydantic import Field, PositiveFloat, ValidationError
 
 from .camera import transform
 from .field import FieldConfig
+from .keypoints import LayoutKeypoints, PieceKind, mesh_center, world_points
 from .model import DEFAULT_CONE_PATH, Record, Vec3, default_cone
 from .visibility import Bounds3D, LeftCameraVisibility, SightTarget
 
-PieceKind = Literal['cone', 'cube']
 BoundsXY = tuple[float, float, float, float]
 MAX_ATTEMPTS = 1000
 MAX_LAYOUT_ATTEMPTS = 20
@@ -40,7 +39,6 @@ class PieceFootprint(Record):
     height_m: float
     radius_m: PositiveFloat
     bounds: Bounds3D
-    samples: list[Vec3]
 
 
 class LayoutGeometry(Record):
@@ -49,6 +47,8 @@ class LayoutGeometry(Record):
     occluders: list[Bounds3D]
     cone_footprints: tuple[PieceFootprint, PieceFootprint]
     cube_footprints: tuple[PieceFootprint, PieceFootprint]
+    cone_center: Vec3
+    cube_center: Vec3
 
 
 @dataclass(frozen=True)
@@ -108,26 +108,23 @@ def _preprocess(config_path: Path, field_path: Path, cone_path: Path, cube_path:
             continue
         obstacles.append((float(low[0]), float(low[1]), float(high[0]), float(high[1])))
 
-    directions = np.array([direction for direction in product((-1, 0, 1), repeat=3)
-                           if direction != (0, 0, 0)], dtype=np.float64)
-
-    def footprints(path: Path, import_rotation: Vec3) -> tuple[PieceFootprint, PieceFootprint]:
-        points = vertices(str(path), path.stat().st_mtime_ns)
+    def footprints(points: NDArray[np.float64], import_rotation: Vec3) -> tuple[PieceFootprint, PieceFootprint]:
         correction = transform((0, 0, 0), import_rotation)
         results: list[PieceFootprint] = []
         for pitch in (0., 90.):
             pose = transform((0, 0, 0), (0, pitch, 0)) @ correction
             rotated = points @ pose[:3, :3].T
-            samples = rotated[np.unique((rotated @ directions.T).argmax(axis=0))]
             results.append(PieceFootprint(height_m=-float(rotated[:, 2].min()),
                                           radius_m=float(np.linalg.norm(rotated[:, :2], axis=1).max()),
-                                          bounds=(_vec3(rotated.min(axis=0)), _vec3(rotated.max(axis=0))),
-                                          samples=[_vec3(point) for point in samples]))
+                                          bounds=(_vec3(rotated.min(axis=0)), _vec3(rotated.max(axis=0)))))
         return results[0], results[1]
 
+    cone = vertices(str(cone_path), cone_path.stat().st_mtime_ns)
+    cube = vertices(str(cube_path), cube_path.stat().st_mtime_ns)
     return LayoutGeometry(field_size_m=(width, height), obstacles=obstacles, occluders=occluders,
-                          cone_footprints=footprints(cone_path, default_cone().import_rotation),
-                          cube_footprints=footprints(cube_path, CUBE_IMPORT_ROTATION))
+                          cone_footprints=footprints(cone, default_cone().import_rotation),
+                          cube_footprints=footprints(cube, CUBE_IMPORT_ROTATION),
+                          cone_center=mesh_center(cone), cube_center=mesh_center(cube))
 
 
 def load_geometry(cache_dir: Path, field_dir: Path = Path('assets/field'),
@@ -135,7 +132,7 @@ def load_geometry(cache_dir: Path, field_dir: Path = Path('assets/field'),
     config = field_dir / 'config.json'
     field = field_dir / 'model.glb'
     cube = field_dir / 'model_1.glb'
-    key = sha256(b'layout-geometry-v2')
+    key = sha256(b'layout-geometry-v3')
     for asset in (config, field, cone_path, cube):
         info = asset.stat()
         key.update(repr((str(asset.resolve()), info.st_size, info.st_mtime_ns, info.st_ctime_ns)).encode())
@@ -206,7 +203,8 @@ def _vec3(values: NDArray[np.float64]) -> Vec3:
     return float(values[0]), float(values[1]), float(values[2])
 
 
-def layout_visibility(geometry: LayoutGeometry, gamepieces: list[GamepiecePose]) -> LeftCameraVisibility:
+def layout_visibility(geometry: LayoutGeometry, gamepieces: list[GamepiecePose],
+                      keypoints: LayoutKeypoints | None = None) -> LeftCameraVisibility:
     targets: list[SightTarget] = []
     for piece in gamepieces:
         footprints = geometry.cone_footprints if piece.kind == 'cone' else geometry.cube_footprints
@@ -216,13 +214,17 @@ def layout_visibility(geometry: LayoutGeometry, gamepieces: list[GamepiecePose])
         low, high = np.asarray(footprint.bounds, dtype=np.float64)
         center = (low + high) / 2 @ rotation.T + translation
         half_extent = (high - low) / 2 @ np.abs(rotation).T
-        points = np.asarray(footprint.samples, dtype=np.float64) @ rotation.T + translation
+        canonical_center = geometry.cone_center if piece.kind == 'cone' else geometry.cube_center
+        canonical_points = ([canonical_center] if keypoints is None
+                            else [point.position for point in keypoints.for_kind(piece.kind)])
+        correction = default_cone().import_rotation if piece.kind == 'cone' else CUBE_IMPORT_ROTATION
+        points = world_points(canonical_points, piece.position, piece.rotation, correction)
         targets.append(SightTarget(points, (_vec3(center - half_extent), _vec3(center + half_extent))))
     return LeftCameraVisibility(geometry.occluders, targets)
 
 
 def _sample_batch(index: int, options: LayoutOptions, geometry: LayoutGeometry,
-                  field: _Field, rng: Random) -> LayoutBatch:
+                  field: _Field, rng: Random, keypoints: LayoutKeypoints | None) -> LayoutBatch:
     for _ in range(MAX_ATTEMPTS):
         count_draw = rng.gauss(options.piece_count_mean, options.piece_count_std)
         if not isfinite(count_draw):
@@ -234,7 +236,7 @@ def _sample_batch(index: int, options: LayoutOptions, geometry: LayoutGeometry,
         raise ValueError(f'Batch {index}: could not sample a piece count for minimum visibility {options.min_visible}')
 
     for _ in range(MAX_LAYOUT_ATTEMPTS if options.min_visible else 1):
-        batch = _sample_arrangement(index, count, options, geometry, field, rng)
+        batch = _sample_arrangement(index, count, options, geometry, field, rng, keypoints)
         if batch is not None:
             return batch
     raise ValueError(f'Batch {index}: could not find {options.batch_size} poses with '
@@ -242,7 +244,7 @@ def _sample_batch(index: int, options: LayoutOptions, geometry: LayoutGeometry,
 
 
 def _sample_arrangement(index: int, count: int, options: LayoutOptions, geometry: LayoutGeometry,
-                        field: _Field, rng: Random) -> LayoutBatch | None:
+                        field: _Field, rng: Random, keypoints: LayoutKeypoints | None) -> LayoutBatch | None:
     gamepieces: list[GamepiecePose] = []
     circles: list[tuple[float, float, float]] = []
     for item in range(1, count + 1):
@@ -264,7 +266,7 @@ def _sample_arrangement(index: int, count: int, options: LayoutOptions, geometry
         else:
             raise ValueError(f'Batch {index}: could not place gamepiece {item} of {count}')
 
-    visibility = layout_visibility(geometry, gamepieces) if options.min_visible else None
+    visibility = layout_visibility(geometry, gamepieces, keypoints) if options.min_visible else None
     robot_poses: list[Vec3] = []
     for pose_index in range(1, options.batch_size + 1):
         for _ in range(MAX_ATTEMPTS):
@@ -282,7 +284,11 @@ def _sample_arrangement(index: int, count: int, options: LayoutOptions, geometry
     return LayoutBatch(gamepieces=gamepieces, robot_poses=robot_poses)
 
 
-def generate_layouts(options: LayoutOptions, geometry: LayoutGeometry, output: Path) -> Path:
+def generate_layouts(options: LayoutOptions, geometry: LayoutGeometry, output: Path,
+                     keypoints: LayoutKeypoints | None = None) -> Path:
+    if keypoints is not None:
+        keypoints.for_kind('cone')
+        keypoints.for_kind('cube')
     if output.exists() or output.is_symlink():
         raise FileExistsError(f'Output directory already exists: {output}')
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -291,7 +297,7 @@ def generate_layouts(options: LayoutOptions, geometry: LayoutGeometry, output: P
     with TemporaryDirectory(prefix='.layouts-', dir=output.parent) as temporary:
         staging = Path(temporary)
         for index in range(1, options.num_batches + 1):
-            batch = _sample_batch(index, options, geometry, field, rng)
+            batch = _sample_batch(index, options, geometry, field, rng, keypoints)
             (staging / f'batch-{index:06d}.json').write_text(batch.model_dump_json(indent=2) + '\n')
         staging.rename(output)
     return output

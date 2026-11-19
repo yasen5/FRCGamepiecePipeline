@@ -111,7 +111,42 @@ To require at least two pieces in every left COS camera view and render the resu
 ./.venv/bin/python -m frc_sim render-layouts --layouts runtime/cos-left-layouts --output runtime/cos-left-renders
 ```
 
-`--min-visible` defaults to zero. The filter uses the left camera calibration and a 70° horizontal × 47.3° vertical field of view. It checks sampled mesh points against conservative occlusion bounds, so it may undercount partially visible pieces. The renderer writes `batch_0/layout.json`, `batch_0/frame_0.png`, and matching scene JSON sidecars, with one numbered directory per layout.
+`--min-visible` defaults to zero. For a gamepiece to count, a strict majority of its points must project inside the calibrated left-camera image and clear the conservative occlusion bounds of field objects and other gamepieces. By default each gamepiece has one point at the center of its mesh-local bounding box. The renderer writes `batch_0/layout.json`, `batch_0/frame_0.png`, and matching scene JSON sidecars, with one numbered directory per layout.
+
+## Keypoint annotations
+
+Batch rendering writes one `keypoints.json` at the root of the output directory. Standalone `render` writes `<image-stem>.keypoints.json` beside the image. The versioned manifest lists the class names in `classes` and one record per frame in `images`. Each frame has a relative `image` path, `width`, `height`, and a `points` list. Each point has a zero-based `class_id` into `classes`, a zero-based `piece_index` into the scene sidecar's `pieces` array, and fractional pixel coordinates `x`, `y` measured from the upper-left. The manifest includes in-frame projections of occluded points. A frame with no in-frame points has an empty list.
+
+By default the only class is `center`. To use named landmarks, save the following example as `runtime/landmarks.json` and pass it explicitly to both layout commands. Positions are in asset-local meters after applying any mesh node transforms and before applying the scene's scale, import rotation, or field pose. The cone's `top` is the center of its chopped tip. Each rounded corner is represented by a mesh point.
+
+```json
+{
+  "cone": [
+    {"name": "top", "position": [0, 0, -0.31273749]},
+    {"name": "corner", "position": [0.0984622, 0.0980155, 0.0127]},
+    {"name": "corner", "position": [0.0984622, -0.0980155, 0.0127]},
+    {"name": "corner", "position": [-0.0984622, -0.0980155, 0.0127]},
+    {"name": "corner", "position": [-0.0984622, 0.0980155, 0.0127]}
+  ],
+  "cube": [
+    {"name": "corner", "position": [-0.09181478, -0.08889998, -0.09123633]},
+    {"name": "corner", "position": [-0.09123633, -0.08889998, 0.09181478]},
+    {"name": "corner", "position": [-0.09181478, 0.08889998, -0.09123633]},
+    {"name": "corner", "position": [-0.09123633, 0.08889998, 0.09181478]},
+    {"name": "corner", "position": [0.09123633, -0.08889998, -0.09181478]},
+    {"name": "corner", "position": [0.09181478, -0.08889998, 0.09123633]},
+    {"name": "corner", "position": [0.09123633, 0.08889998, -0.09181478]},
+    {"name": "corner", "position": [0.09181478, 0.08889998, 0.09123633]}
+  ]
+}
+```
+
+```sh
+./.venv/bin/python -m frc_sim generate-layouts --batch-size 5 --min-visible 2 --seed 2023 --output runtime/landmark-layouts --keypoints --keypoints-file runtime/landmarks.json
+./.venv/bin/python -m frc_sim render-layouts --layouts runtime/landmark-layouts --output runtime/landmark-renders --keypoints --keypoints-file runtime/landmarks.json
+```
+
+With these definitions, three cone points or five cube points must pass the visibility check for the piece to count. For standalone rendering, put the corresponding landmark list in each gamepiece's `keypoints` field in the scene JSON, then pass `--keypoints` to `render`.
 
 ## Validation
 

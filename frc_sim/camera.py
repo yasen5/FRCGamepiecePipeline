@@ -11,6 +11,8 @@ from numpy.typing import NDArray
 from .model import Calibration, Scene, Vec3
 
 Matrix = NDArray[np.float64]
+CAMERA_NEAR = .02
+CAMERA_FAR = 100.
 
 
 def transform(position: Vec3, angles: Vec3) -> Matrix:
@@ -24,6 +26,39 @@ def transform(position: Vec3, angles: Vec3) -> Matrix:
                        [-sp, cp*sr, cp*cr]]
     result[:3, 3] = position
     return result
+
+
+def piece_transform(position: Vec3, rotation: Vec3, import_rotation: Vec3) -> Matrix:
+    return transform(position, rotation) @ transform((0, 0, 0), import_rotation)
+
+
+def _optics(calibration: Calibration, fx: float, fy: float, cx: float, cy: float) -> tuple[Matrix, Matrix]:
+    i = calibration.intrinsics
+    return (np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64),
+            np.array([i.k1, i.k2, i.p1, i.p2, i.k3], dtype=np.float64))
+
+
+class ImageProjector:
+    """Project world points to the native, optionally distorted output image."""
+
+    def __init__(self, calibration: Calibration, distorted: bool) -> None:
+        self.width, self.height = calibration.width, calibration.height
+        i = calibration.intrinsics
+        self.intrinsics, coefficients = _optics(calibration, i.fx, i.fy, i.cx, i.cy)
+        self.distortion = coefficients if distorted else None
+        self.zero = np.zeros(3, dtype=np.float64)
+
+    def project(self, points: Matrix, pose: Matrix) -> tuple[NDArray[np.intp], Matrix]:
+        forward, left, up = ((points - pose[:3, 3]) @ pose[:3, :3]).T
+        indices = np.flatnonzero((forward > CAMERA_NEAR) & (forward < CAMERA_FAR))
+        if not indices.size:
+            return indices, np.empty((0, 2), dtype=np.float64)
+        optical = np.column_stack((-left[indices], -up[indices], forward[indices]))
+        pixels, _ = cv2.projectPoints(optical, self.zero, self.zero, self.intrinsics, self.distortion)
+        pixels = np.asarray(pixels, dtype=np.float64).reshape(-1, 2)
+        x, y = pixels.T
+        inside = (x >= 0) & (x < self.width) & (y >= 0) & (y < self.height)
+        return indices[inside], pixels[inside]
 
 
 def camera_pose(scene: Scene) -> Matrix:
@@ -76,8 +111,7 @@ def projection(calibration_json: str, preview: bool, distorted: bool) -> Project
     fx, fy, cx, cy = i.fx*sx, i.fy*sy, i.cx*sx, i.cy*sy
     if not distorted:
         return Projection(w, h, fx, fy, cx, cy)
-    k = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
-    d = np.array([i.k1, i.k2, i.p1, i.p2, i.k3])
+    k, d = _optics(c, fx, fy, cx, cy)
     yy, xx = np.mgrid[:h, :w]
     pixels = np.stack([xx, yy], axis=-1).astype(np.float64).reshape(-1, 1, 2)
     ideal = cv2.undistortPoints(pixels, k, d, P=k).reshape(h, w, 2)
