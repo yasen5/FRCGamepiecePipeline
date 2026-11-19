@@ -72,11 +72,13 @@ def default_cone() -> Piece:
 
 
 class Light(Record):
-    kind: Literal["directional", "point", "spot"] = "directional"
+    kind: Literal["directional", "point", "spot", "area"] = "directional"
     position: Vec3 = (4, 4, 6)
     direction: Vec3 = (0.3, 0.4, -1)
     color: Vec3 = (1, 1, 1)
     intensity: Annotated[float, Field(ge=0)] = 1
+    width: PositiveFloat = 1.5
+    height: PositiveFloat = 0.8
     shadow: bool = True
     inner_degrees: Annotated[float, Field(gt=0, lt=179)] = 30
     outer_degrees: Annotated[float, Field(gt=0, lt=179)] = 60
@@ -93,14 +95,25 @@ def default_calibration() -> Calibration:
             p1=.0033423455589040776, p2=.00036377102345917046))
 
 
+class RenderSettings(Record):
+    samples_per_pixel: Annotated[int, Field(ge=64, le=1024)] = 256
+    path_depth: Annotated[int, Field(ge=1, le=32)] = 8
+
+
+def indoor_lights() -> list[Light]:
+    return [Light(kind='area', position=(x, y, 8), direction=(0, 0, -1), intensity=20)
+            for x in (3., 8.27, 13.54) for y in (2., 6.)]
+
+
 class Scene(Record):
     version: Literal[1] = 1
     field_dir: str = "assets/field"
     calibration: Calibration | None = Field(default_factory=default_calibration)
     robot_xy_heading: Vec3 = (2, 4, 0)
     pieces: list[Piece] = Field(default_factory=lambda: [default_cone()])
-    lights: list[Light] = Field(default_factory=lambda: [Light()])
-    ambient: Vec3 = (0.2, 0.2, 0.2)
+    lights: list[Light] = Field(default_factory=indoor_lights)
+    ambient: Vec3 = (0.03, 0.03, 0.03)
+    render_settings: RenderSettings = Field(default_factory=RenderSettings)
     distortion: bool = True
     inspect_target: Vec3 = (8.27, 4, 0)
     inspect_yaw: float = 225

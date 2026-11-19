@@ -14,7 +14,7 @@ from PIL import Image
 
 from .model import Calibration, Light, Piece, Scene, GamepiecePlacement, default_cone, load_scene, scene_json
 from .renderer import RenderService
-from .interaction import drive, place
+from .interaction import place
 
 
 def launch(state: Scene, host: str, port: int) -> None:
@@ -23,21 +23,21 @@ def launch(state: Scene, host: str, port: int) -> None:
         nonlocal state
         busy = False
         revision = 0
-        rendered_revision = -1
-        inspection = False
-        axes = (0., 0., 0.)
-        input_at = 0.
-        last_step = time.monotonic()
+        rendered_snapshot: Scene | None = None
+        rendered_png: bytes | None = None
         dragging: str | None = None
         field_width = 16.54175
         field_height = 8.0137
         map_width, map_height = 1100, 533
-        background_loaded = False
         selected = 0
 
         def dirty() -> None:
             nonlocal revision
             revision += 1
+            field_map.set_content(overlay())
+            pose_label.set_text("Robot X %.2f m • Y %.2f m • heading %.1f°" % state.robot_xy_heading)
+            if not busy:
+                status.set_text("Scene changed — click Render")
 
         def set_vector(record: object, field: str, index: int, value: float | None) -> None:
             if value is None:
@@ -81,16 +81,17 @@ def launch(state: Scene, host: str, port: int) -> None:
                 ui.notify(str(error), type='negative')
 
         def load_document() -> None:
-            nonlocal state, background_loaded, selected
+            nonlocal state, selected
             try:
                 state = load_scene(Path(document.value))
                 selected = 0
-                background_loaded = False
                 objects.refresh()
                 lighting.refresh()
                 robot.refresh()
+                quality.refresh()
                 field_map.set_content(overlay())
                 dirty()
+                ui.timer(.01, load_background, once=True)
             except Exception as error:
                 ui.notify(str(error), type='negative')
 
@@ -103,15 +104,15 @@ def launch(state: Scene, host: str, port: int) -> None:
             except Exception as error:
                 ui.notify(str(error), type='negative')
 
-        async def export() -> None:
-            try:
-                snapshot = state.model_copy(deep=True)
-                path = Path('runtime') / f'export-{uuid4().hex}.png'
-                await asyncio.get_running_loop().run_in_executor(service.executor, service.export, snapshot, path)
-                ui.download.file(path)
-                ui.download.file(path.with_suffix('.json'))
-            except Exception as error:
-                ui.notify(str(error), type='negative')
+        def export() -> None:
+            if rendered_png is None or rendered_snapshot is None:
+                ui.notify('Render an image first', type='warning')
+                return
+            path = Path('runtime') / f'export-{uuid4().hex}.png'
+            path.write_bytes(rendered_png)
+            path.with_suffix('.json').write_text(scene_json(rendered_snapshot, path.with_suffix('.json')))
+            ui.download.file(path)
+            ui.download.file(path.with_suffix('.json'))
 
         def overlay() -> str:
             content = '<rect width="1100" height="533" fill="transparent" stroke="white"/>'
@@ -129,23 +130,11 @@ def launch(state: Scene, host: str, port: int) -> None:
             content += f'<circle cx="{px}" cy="{py}" r="15" fill="#44aaff"/>'
             angle = math.radians(heading)
             content += f'<line x1="{px}" y1="{py}" x2="{px+35*math.cos(angle)}" y2="{py-35*math.sin(angle)}" stroke="#44aaff" stroke-width="6"/>'
+            content += f'<circle cx="{px+35*math.cos(angle)}" cy="{py-35*math.sin(angle)}" r="7" fill="#44aaff"/>'
             return content
-
-        def change_view(e: events.ValueChangeEventArguments) -> None:
-            nonlocal inspection, axes
-            inspection = e.value == 'Scene editor'
-            axes = (0., 0., 0.)
-            image.set_visibility(not inspection)
-            editor_panel.set_visibility(inspection)
-            asset.set_visibility(inspection)
-            field_map.set_visibility(inspection)
-            field_map.set_content(overlay())
-            dirty()
 
         def mouse(e: events.MouseEventArguments) -> None:
             nonlocal dragging, selected
-            if not inspection:
-                return
             x = max(0., min(field_width, e.image_x/map_width*field_width))
             y = max(0., min(field_height, (1-e.image_y/map_height)*field_height))
             if e.type == 'mousedown':
@@ -201,52 +190,15 @@ def launch(state: Scene, host: str, port: int) -> None:
         ui.label('Meters • NWU coordinates • angles in degrees • calibrated exports')
         with ui.row().classes('w-full items-start'):
             with ui.column().classes('grow'):
-                ui.toggle(['Drive', 'Scene editor'], value='Drive', on_change=change_view)
-                ui.label('Click camera to drive: W/S forward/back • A/D strafe • Q/E turn. Editor: click to place, drag to move, drag direction handle to rotate.')
-                image = ui.interactive_image(size=(960, 600)).classes('w-full').props('tabindex=0')
+                ui.label('Drag markers to move; drag direction handles to rotate. Click the field to place a gamepiece.')
                 field_map = ui.interactive_image(size=(map_width, map_height), on_mouse=mouse,
                     events=['mousedown', 'mousemove', 'mouseup', 'mouseleave']).classes('w-full bg-slate-800')
-                field_map.set_visibility(False)
                 field_map.set_content(overlay())
-                status = ui.label('Initializing renderer…')
-                pose_label = ui.label()
-                speed = ui.slider(min=.1, max=4, step=.1, value=1).props('label-always')
-                ui.label('Drive speed (m/s)')
-                turn_speed = ui.slider(min=10, max=180, step=5, value=60).props('label-always')
-                ui.label('Turn speed (degrees/s)')
+                pose_label = ui.label('Robot X %.2f m • Y %.2f m • heading %.1f°' % state.robot_xy_heading)
                 asset = ui.select(['Cone', 'Cube', 'Selected gamepiece'], value='Cone', label='Click-to-place asset')
-                def motion(e: events.GenericEventArguments) -> None:
-                    nonlocal axes, input_at
-                    # Browser event data is untrusted; validate before storing typed axes.
-                    values = e.args
-                    if not isinstance(values, list) or len(values) != 3:
-                        return
-                    if not all(isinstance(v, (int, float)) and v in (-1, 0, 1) for v in values):
-                        return
-                    axes = (float(values[0]), float(values[1]), float(values[2]))
-                    input_at = time.monotonic()
-                image.on('drive', motion)
-                ui.run_javascript("""setTimeout(() => {
-                    // Use NiceGUI's lookup; DOM ID prefixes vary between versions.
-                    const el = getHtmlElement("""+str(image.id)+""");
-                    if (!el) return;
-                    const keys = new Set();
-                    const send = () => {
-                        const active = document.activeElement === el && !document.hidden;
-                        if (!active) keys.clear();
-                        const k = x => keys.has(x) ? 1 : 0;
-                        getElement("""+str(image.id)+""").$emit('drive', [k('KeyW')-k('KeyS'), k('KeyA')-k('KeyD'), k('KeyQ')-k('KeyE')]);
-                    };
-                    el.addEventListener('pointerdown', () => el.focus());
-                    document.addEventListener('keydown', e => {
-                        if (document.activeElement !== el || !['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE'].includes(e.code)) return;
-                        e.preventDefault(); keys.add(e.code); send();
-                    });
-                    document.addEventListener('keyup', e => { keys.delete(e.code); send(); });
-                    el.addEventListener('blur', () => {keys.clear(); send();});
-                    window.addEventListener('blur', () => {keys.clear(); send();});
-                    const timer = setInterval(() => {if (!el.isConnected) clearInterval(timer); else send();}, 100);
-                }, 100);""")
+                render_button = ui.button('Render', on_click=lambda: render_image())
+                status = ui.label('Click Render to create a ray-traced camera image')
+                image = ui.image().classes('w-full')
                 ui.button('Export calibrated PNG + settings', on_click=export)
             with ui.column().classes('w-96') as editor_panel:
                 ui.upload(label='GLB / STL / combined camera JSON', on_upload=upload, auto_upload=True)
@@ -286,6 +238,13 @@ def launch(state: Scene, host: str, port: int) -> None:
                     ui.switch('Lens distortion', value=state.distortion,
                               on_change=lambda e: (setattr(state, 'distortion', e.value), dirty()))
                 robot()
+                @ui.refreshable
+                def quality() -> None:
+                    with ui.expansion('Render quality'):
+                        ui.number('Samples per pixel', value=state.render_settings.samples_per_pixel, min=64, max=1024, step=64,
+                              on_change=lambda e: (setattr(state.render_settings, 'samples_per_pixel', int(e.value)), dirty()) if e.value is not None else None)
+
+                quality()
 
                 @ui.refreshable
                 def objects() -> None:
@@ -346,14 +305,18 @@ def launch(state: Scene, host: str, port: int) -> None:
                     vector_controls(state, 'ambient', ('Ambient R', 'Ambient G', 'Ambient B'))
                     for index, light in enumerate(state.lights):
                         with ui.expansion(f'Light {index+1}: {light.kind}'):
-                            ui.select(['directional', 'point', 'spot'], value=light.kind,
-                                      on_change=lambda e, l=light: (setattr(l, 'kind', e.value), dirty()))
+                            ui.select(['directional', 'point', 'spot', 'area'], value=light.kind,
+                                      on_change=lambda e, l=light: (setattr(l, 'kind', e.value), lighting.refresh(), dirty()))
                             vector_controls(light, 'position', ('Light X', 'Light Y', 'Light Z'))
                             vector_controls(light, 'direction', ('Direction X', 'Direction Y', 'Direction Z'))
                             vector_controls(light, 'color', ('Red', 'Green', 'Blue'))
                             ui.label('Intensity')
-                            ui.slider(value=light.intensity, min=0, max=10, step=.05,
+                            ui.slider(value=light.intensity, min=0, max=100, step=.05,
                                       on_change=lambda e, l=light: (setattr(l, 'intensity', e.value), dirty()))
+                            if light.kind == 'area':
+                                for dimension in ('width', 'height'):
+                                    ui.number(dimension + ' (m)', value=getattr(light, dimension), min=.01,
+                                              on_change=lambda e, l=light, f=dimension: (setattr(l, f, e.value), dirty()))
                             for field in ['inner_degrees', 'outer_degrees']:
                                 ui.label(field)
                                 ui.slider(value=getattr(light, field), min=1, max=178, step=1,
@@ -375,49 +338,39 @@ def launch(state: Scene, host: str, port: int) -> None:
                 ui.button('Save scene + download', on_click=save_document)
                 ui.button('Load server scene', on_click=load_document)
 
-        editor_panel.set_visibility(False)
-        asset.set_visibility(False)
+        async def load_background() -> None:
+            try:
+                frame = await asyncio.get_running_loop().run_in_executor(service.executor, service.field_map, state.model_copy(deep=True), map_width, map_height)
+                buffer = io.BytesIO()
+                Image.fromarray(frame).save(buffer, format='PNG')
+                field_map.set_source('data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode())
+            except Exception as error:
+                ui.notify(f'Field background failed: {error}', type='negative')
 
-        def advance_motion() -> None:
-            nonlocal last_step
-            now = time.monotonic()
-            dt = min(now-last_step, .1)
-            last_step = now
-            if not inspection and now-input_at < .3 and any(axes):
-                state.robot_xy_heading = drive(state.robot_xy_heading, *axes, dt, float(speed.value or 1), float(turn_speed.value or 60))
-                dirty()
-            pose_label.set_text('Robot X %.2f m • Y %.2f m • heading %.1f°' % state.robot_xy_heading)
-
-        # Keep driving responsive while the independent render timer awaits a frame.
-        ui.timer(1/60, advance_motion)
-
-        async def tick() -> None:
-            nonlocal busy, rendered_revision, background_loaded
-            if busy or rendered_revision == revision:
+        async def render_image() -> None:
+            nonlocal busy, rendered_snapshot, rendered_png
+            if busy:
                 return
             busy = True
+            render_button.disable()
             current = revision
+            snapshot = state.model_copy(deep=True)
+            status.set_text('Ray tracing…')
             started = time.monotonic()
             try:
-                if inspection:
-                    if not background_loaded:
-                        frame = await asyncio.get_running_loop().run_in_executor(service.executor, service.field_map, state.model_copy(deep=True), map_width, map_height)
-                        buffer = io.BytesIO()
-                        Image.fromarray(frame).save(buffer, format='PNG')
-                        field_map.set_source('data:image/png;base64,'+base64.b64encode(buffer.getvalue()).decode())
-                        background_loaded = True
-                    field_map.set_content(overlay())
-                    return
-                frame = await asyncio.get_running_loop().run_in_executor(
-                    service.executor, service.render, state.model_copy(deep=True), True, False)
+                frame = await asyncio.get_running_loop().run_in_executor(service.executor, service.render, snapshot)
                 buffer = io.BytesIO()
-                Image.fromarray(frame).save(buffer, format='JPEG', quality=85)
-                image.set_source('data:image/jpeg;base64,'+base64.b64encode(buffer.getvalue()).decode())
-                status.set_text(f'{time.monotonic()-started:.3f} s / frame • {frame.shape[1]}×{frame.shape[0]}')
+                Image.fromarray(frame).save(buffer, format='PNG')
+                png = buffer.getvalue()
+                image.set_source('data:image/png;base64,' + base64.b64encode(png).decode())
+                rendered_snapshot, rendered_png = snapshot, png
+                stale = ' • Scene changed — click Render again' if revision != current else ''
+                status.set_text(f'{time.monotonic()-started:.2f} s • {frame.shape[1]}×{frame.shape[0]} • {snapshot.render_settings.samples_per_pixel} samples/pixel' + stale)
             except Exception as error:
-                status.set_text(f'Render failed: {error}. Check Vulkan and GPU driver availability.')
+                status.set_text(f'Render failed: {error}. Check Vulkan ray-tracing support and GPU drivers.')
             finally:
-                rendered_revision = current
                 busy = False
-        ui.timer(1/15, tick)
+                render_button.enable()
+
+        ui.timer(.1, load_background, once=True)
     ui.run(root=page, host=host, port=port, reload=False, show=False, title='FRC SAPIEN viewer')

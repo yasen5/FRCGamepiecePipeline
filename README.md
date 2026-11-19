@@ -23,7 +23,7 @@ ssh -L 8080:127.0.0.1:8080 USER@SERVER
 
 Then open <http://localhost:8080>. All connected browsers control the same scene. Keep this service behind the SSH tunnel; it intentionally provides server-file loading for its owner.
 
-The observed NVIDIA `Driver/library version mismatch` must be repaired on the host before GPU validation. A reboot after a driver update may resolve it; confirm a functioning Vulkan device as well as `nvidia-smi`. The renderer reports initialization errors in the preview status.
+After a driver update, an NVIDIA `Driver/library version mismatch` may require rebooting the host. Confirm a functioning Vulkan device as well as `nvidia-smi`. Headless raster and ray-tracing validation passed on the RTX 4070 with driver 595.99.02 after reboot. The renderer reports initialization errors in the render status.
 
 ## Default gamepiece
 
@@ -31,14 +31,15 @@ New scenes and **Add cone** use `2023ChargedUpConeChopped.glb` from the reposito
 
 ## Using the viewer
 
-1. **Drive** opens directly in the left robot camera. Click the image to focus, then hold **W/S** to drive forward/backward, **A/D** to strafe left/right, and **Q/E** to turn counterclockwise/clockwise. Movement follows the robot heading. Speed sliders use meters/second and degrees/second. Leaving the image focus stops movement.
-2. Switch to **Scene editor** for the top-down field. Choose Cone, Cube, or Selected gamepiece, then click carpet to place an instance. Click/drag existing markers to select/move them; drag the direction handle to change theta. The blue marker and handle edit the robot's starting pose.
-3. Choose **upright** or **fallen** for the selected gamepiece. Theta is counterclockwise ground yaw from field +X. The two tilt presets and import corrections are asset metadata, not viewer controls. Placement computes carpet contact from transformed mesh vertices, without physics.
-4. Upload GLB/STL models or enter a server model path. Enable **Tagged gamepiece** to use the same placement workflow for imported assets. Configure source-axis corrections, tilt presets, and unit scale in the scene JSON when needed.
-5. Gamepiece controls are limited to X/Y, theta, and Upright/Down. Camera mounting and lighting have their own sliders in the editor. New scenes automatically use the 1280×800 calibration and mounting pose from [frc971/cos left_camera.json](https://github.com/frc971/cos/blob/main/constants/second_bot/left_camera.json), bundled locally so startup works offline. Explicit saved or uploaded calibrations are retained.
-6. Export a calibrated PNG and accompanying scene JSON. Save/load scenes using server JSON paths; keep referenced assets alongside their relative paths when transferring scenes.
+1. Use the top-down field to place gamepieces and drag robot or gamepiece markers. Drag a direction handle to change theta (counterclockwise from field +X).
+2. Choose Cone, Cube, or Selected gamepiece to place on the carpet. Choose Upright or Down for a selected gamepiece; height is calculated from mesh contact.
+3. Click **Render** to create one ray-traced camera image. Editing never triggers camera rendering. The previous image stays visible and is marked outdated after changes.
+4. Camera output uses the calibration's native resolution (1280×800 by default), transmitted as lossless PNG. Ray tracing defaults to 256 samples per pixel, 8 bounces, and no denoising. Change samples under Render quality (64–1024).
+5. New scenes use overhead area lights and weak ambient fill. Existing saved scenes retain explicit lighting. Edit light positions, directions, colors, intensity, and area dimensions in the controls. Final lighting intensity needs visual tuning on a working GPU.
+6. Upload GLB/STL models or a combined camera JSON, or enter server paths. Tag imported models as gamepieces to enable field placement. Camera mounting and lighting have their own controls.
+7. **Export calibrated PNG + settings** downloads the displayed image and its exact scene snapshot, even if you have since edited the scene. Save/load scene controls handle the current editable scene independently.
 
-Preview uses compressed JPEG at up to 15 Hz; actual speed depends on the GPU and scene. Exported PNG uses full calibration resolution. The top-down editor uses an orthographic rendering of the field with selectable overlays. Driving does not simulate collisions.
+The field background is a cached orthographic raster image with editor illumination. Robot camera output, exports, and CLI renders use SAPIEN's ray-tracing shader and require compatible Vulkan ray-tracing hardware and drivers. Failures are reported without substituting raster output. All connected browsers share the scene; each browser requests its own stills.
 
 ## Calibration and coordinate conventions
 

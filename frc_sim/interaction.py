@@ -1,22 +1,11 @@
-"""Field editing geometry and robot-relative driving (meters, degrees, seconds)."""
+"""Field editing geometry (meters and degrees)."""
 from functools import lru_cache
 from pathlib import Path
-import math
 import numpy as np
 from numpy.typing import NDArray
 import trimesh
 from .camera import transform
-from .model import Piece, Vec3
-
-
-def drive(pose: Vec3, forward: float, left: float, turn: float,
-          seconds: float, speed: float, angular_speed: float) -> Vec3:
-    norm = max(1., math.hypot(forward, left))
-    angle = math.radians(pose[2])
-    distance = speed * seconds / norm
-    return (pose[0] + distance * (forward*math.cos(angle)-left*math.sin(angle)),
-            pose[1] + distance * (forward*math.sin(angle)+left*math.cos(angle)),
-            (pose[2]+turn*angular_speed*seconds) % 360)
+from .model import Piece
 
 
 @lru_cache(maxsize=32)

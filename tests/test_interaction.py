@@ -1,10 +1,9 @@
 """Placement-to-document pipeline and pivotal driving integration."""
 from pathlib import Path
-import math
 import numpy as np
 import pytest
 from frc_sim.camera import transform
-from frc_sim.interaction import drive, place, vertices
+from frc_sim.interaction import place, vertices
 from frc_sim.model import Scene, Piece, GamepiecePlacement, default_cone, load_scene, scene_json
 
 
@@ -30,16 +29,3 @@ def test_placement_document_pipeline(tmp_path: Path, asset: str) -> None:
                 assert restored.gamepiece == piece.gamepiece
                 assert restored.position == piece.position
                 assert restored.rotation == piece.rotation
-
-
-def test_robot_relative_driving() -> None:
-    assert drive((0, 0, 90), 1, 0, 0, 1, 1, 60) == pytest.approx((0, 1, 90))
-    assert drive((0, 0, 90), 0, 1, 0, 1, 1, 60) == pytest.approx((-1, 0, 90))
-    x, y, heading = drive((0, 0, 0), 1, 1, 1, .5, 2, 60)
-    assert math.hypot(x, y) == pytest.approx(1)
-    assert heading == 30
-    assert drive((1, 2, 30), 0, 0, -1, .5, 1, 60) == (1, 2, 0)
-    pose = (0., 0., 0.)
-    for _ in range(10):
-        pose = drive(pose, 1, 0, 0, .1, 1, 60)
-    assert pose == pytest.approx((1, 0, 0))

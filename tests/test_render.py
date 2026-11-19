@@ -17,6 +17,11 @@ def test_full_pipeline(tmp_path: Path) -> None:
         Piece(name='cube', path='assets/field/model_1.glb', position=(4, 4.5, 0), import_rotation=(90, 0, 0))])
     service = RenderService()
     try:
+        # Exercise both explicit shader packs and switching between them.
+        field = service.executor.submit(service.field_map, state, 1100, 533).result()
+        assert field.shape == (533, 1100, 3)
+        assert field.std() > 1
+        Image.fromarray(field).save(tmp_path/'field.png')
         path = tmp_path/'frame.png'
         service.executor.submit(service.export, state, path).result()
         first = np.asarray(Image.open(path))
@@ -24,7 +29,11 @@ def test_full_pipeline(tmp_path: Path) -> None:
         assert first.std() > 1
         reloaded = load_scene(path.with_suffix('.json'))
         second = service.executor.submit(service.render, reloaded).result()
-        np.testing.assert_allclose(first, second, atol=2)
+        assert np.mean(np.abs(first.astype(float)-second.astype(float))) < 3
+        field_again = service.executor.submit(service.field_map, state, 1100, 533).result()
+        np.testing.assert_array_equal(field, field_again)
+        assert reloaded.render_settings == state.render_settings
+        assert all(light.kind == "area" for light in reloaded.lights)
         state.robot_xy_heading = (2.5, 4, 10)
         state.pieces[0].rotation = (0, 0, 45)
         state.lights[0].direction = (-.5, .4, -1)
