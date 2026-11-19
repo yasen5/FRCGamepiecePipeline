@@ -135,7 +135,8 @@ def load_scene(path: Path) -> Scene:
 def scene_json(scene: Scene, destination: Path) -> str:
     import os
     result = scene.model_copy(deep=True)
-    result.field_dir = os.path.relpath(scene.field_dir, destination.parent)
+    parent = destination.parent.resolve()
+    result.field_dir = os.path.relpath(Path(scene.field_dir).resolve(), parent)
     for piece in result.pieces:
-        piece.path = os.path.relpath(piece.path, destination.parent)
+        piece.path = os.path.relpath(Path(piece.path).resolve(), parent)
     return result.model_dump_json(indent=2)

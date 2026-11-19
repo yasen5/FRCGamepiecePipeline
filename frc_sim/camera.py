@@ -29,8 +29,12 @@ def transform(position: Vec3, angles: Vec3) -> Matrix:
 def camera_pose(scene: Scene) -> Matrix:
     if scene.calibration is None:
         raise ValueError("Load camera calibration before exporting")
-    e = scene.calibration.extrinsics
-    x, y, heading = scene.robot_xy_heading
+    return robot_camera_pose(scene.robot_xy_heading, scene.calibration)
+
+
+def robot_camera_pose(pose: Vec3, calibration: Calibration) -> Matrix:
+    e = calibration.extrinsics
+    x, y, heading = pose
     return transform((x, y, 0), (0, 0, heading)) @ transform(
         (e.translation_x, e.translation_y, e.translation_z),
         (e.rotation_x, e.rotation_y, e.rotation_z))

@@ -10,26 +10,10 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
-from pydantic import BaseModel
 
 from .camera import camera_pose, inspection_pose, projection, transform
-from .model import DEFAULT_CONE_PATH, GamepiecePlacement, Scene, scene_json
-
-
-class FieldRotation(BaseModel):
-    axis: str
-    degrees: float
-
-
-class FieldPiece(BaseModel):
-    stagedObjects: list[str] = []
-
-
-class FieldConfig(BaseModel):
-    widthInches: float
-    heightInches: float
-    rotations: list[FieldRotation]
-    gamePieces: list[FieldPiece] = []
+from .field import FieldConfig
+from .model import DEFAULT_CONE_PATH, GamepiecePlacement, Scene, Vec3, scene_json
 
 
 class Renderer:
@@ -40,6 +24,7 @@ class Renderer:
         # 3.0.3 renders offscreen without constructing a Viewer or window.
         self.scene: Any = None
         self.signature = ''
+        self.piece_poses: tuple[tuple[Vec3, Vec3], ...] = ()
         self.actors: list[Any] = []
         self.camera: Any = None
         self.camera_size = (0, 0)
@@ -65,26 +50,20 @@ class Renderer:
         self.camera_size = (0, 0)
         self.actors = []
         config = FieldConfig.model_validate_json((root / 'config.json').read_text())
-        field_pose = transform((config.widthInches*.0254/2, config.heightInches*.0254/2, 0), (0, 0, 180))
-        for rotation in config.rotations:
-            angles = [0., 0., 0.]
-            angles[['x', 'y', 'z'].index(rotation.axis)] = rotation.degrees
-            field_pose = field_pose @ transform((0, 0, 0), (angles[0], angles[1], angles[2]))
+        field_pose = config.world_transform()
         # Remove staged objects by GLB node name while preserving scene hierarchy/materials.
         import hashlib
         cache = Path('runtime') / ('field-' + hashlib.sha256(
             (root / 'model.glb').read_bytes() + (root / 'config.json').read_bytes()
-            + b'matte-carpet-and-gamepieces-v1').hexdigest()[:16] + '.glb')
+            + b'matte-carpet-and-gamepieces-v2').hexdigest()[:16] + '.glb')
         if not cache.exists():
             import trimesh
             from trimesh.visual.material import PBRMaterial
             from trimesh.visual.texture import TextureVisuals
 
             model = trimesh.load_scene(str(root / 'model.glb'))
-            staged = {name for piece in config.gamePieces for name in piece.stagedObjects}
-            for node in list(model.graph.nodes_geometry):
-                if node in staged:
-                    model.graph.transforms.remove_node(node)
+            for node in config.staged_nodes(list(model.graph.nodes_geometry)):
+                model.graph.transforms.remove_node(node)
             matte_meshes = {'Carpet (FE-2023-01)', 'Traffic Cone v2', 'Cube v3'}
             for name, mesh in model.geometry.items():
                 # Trimesh appends numeric suffixes to duplicate mesh names.
@@ -127,6 +106,7 @@ class Renderer:
                     raise ValueError('Spotlight inner angle must not exceed outer angle')
                 self.scene.add_spot_light(light.position, light.direction,
                                          np.deg2rad(light.inner_degrees), np.deg2rad(light.outer_degrees), color, **common)
+        self.piece_poses = tuple((piece.position, piece.rotation) for piece in state.pieces)
         self.signature = signature
 
     def add_mesh(self, path: Path, pose: NDArray[np.float64], scale: float,
@@ -177,9 +157,12 @@ class Renderer:
         self.api.render.set_ray_tracing_path_depth(state.render_settings.path_depth)
         self.api.render.set_ray_tracing_denoiser('none')
         self.rebuild(state)
-        for actor, piece in zip(self.actors[1:], state.pieces):
-            actor.set_pose(self.api.Pose(transform(piece.position, piece.rotation) @
-                                         transform((0, 0, 0), piece.import_rotation)))
+        poses = tuple((piece.position, piece.rotation) for piece in state.pieces)
+        if poses != self.piece_poses:
+            for actor, piece, pose, previous in zip(self.actors[1:], state.pieces, poses, self.piece_poses):
+                if pose != previous:
+                    actor.set_pose(self.api.Pose(transform(*pose) @ transform((0, 0, 0), piece.import_rotation)))
+            self.piece_poses = poses
         if inspection:
             from .camera import Projection
             p = Projection(960, 540, 700, 700, 480, 270)
@@ -227,7 +210,7 @@ class RenderService:
         background.ambient = (.3, .3, .3)
         renderer.rebuild(background)
         config = FieldConfig.model_validate_json((Path(state.field_dir)/'config.json').read_text())
-        w, h = config.widthInches*.0254, config.heightInches*.0254
+        w, h = config.size_m
         camera = renderer.add_camera('field-map', width, height, 'default')
         try:
             camera.set_orthographic_parameters(.02, 100, -w/2, w/2, -h/2, h/2)

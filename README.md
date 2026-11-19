@@ -74,11 +74,44 @@ Save a scene in the browser, then render without starting the browser server:
 ./.venv/bin/python -m frc_sim render --scene runtime/scene.json --output runtime/example.png
 ```
 
-JSON asset paths are relative to the JSON file. Exports embed the effective calibration, object transforms, lights, robot pose, and distortion setting. The matching PNG and JSON share a basename. Rendering neither simulates exposure nor copies acquisition FPS into a physical simulation. Physics settling, batch datasets, depth/masks, and STEP conversion are not implemented.
+JSON asset paths are relative to the JSON file. Exports embed the effective calibration, object transforms, lights, robot pose, and distortion setting. The matching PNG and JSON share a basename. Rendering neither simulates exposure nor copies acquisition FPS into a physical simulation. Physics settling, depth/masks, and STEP conversion are not implemented.
 
 `assets/field` links to `/mnt/ssd2/data/frc_sim/2023-field-v5`. A new `runtime` link points to a unique folder under `/mnt/ssd2/tmp_outputs/` on first launch. Uploads, cleaned field caches, and default exports go there. Keep the target folder if you want its saved scenes to remain usable; downloads do not bundle referenced assets.
 
 The pinned [AdvantageScope field archive](https://github.com/Mechanical-Advantage/AdvantageScopeAssets/releases/download/archive-v1/Field3d_2023FRCFieldV5.zip) is verified with SHA-256 `ffd6141541d280380b9749065b197edbcd920fe1f2b1f2853adb8df9aa4015f9`. Its license and source attribution accompany the local asset. Staged gamepiece nodes are omitted from the field rendering; added instances are separate.
+
+## Generate batched gamepiece layouts
+
+From the repository root, with the field assets available, run:
+
+```sh
+./.venv/bin/python -m frc_sim generate-layouts --batch-size 32 --num-batches 10 --seed 2023
+```
+
+The command prints the run directory under `runtime/`. Use `--output` to name a new directory. Each numbered JSON file contains one gamepiece layout and exactly `--batch-size` robot poses. Reuse the layout across those views and compose each robot pose with the camera extrinsics.
+
+```json
+{
+  "version": 1,
+  "gamepieces": [
+    {"kind": "cone", "position": [4.0, 5.0, 0.0127], "rotation": [0, 0, 130]}
+  ],
+  "robot_poses": [[5.2, 4.1, 135], [6.3, 4.7, 180]]
+}
+```
+
+Positions are in meters in the blue-origin field frame. Gamepiece angles are roll, pitch, and yaw in degrees before applying the asset's import correction. A cone uses the chopped cone with its 180° X import correction. A cube uses `assets/field/model_1.glb` with a 90° X import correction. Robot poses are `[x, y, theta]`, with counterclockwise heading in degrees and implicit zero Z, roll, and pitch. A downstream renderer supplies the assets and calibration.
+
+The piece count is a rounded normal draw clamped to zero, controlled by `--piece-count-mean` (8) and `--piece-count-std` (3). Piece types and upright/fallen stances are sampled independently with equal probability. The robot footprint defaults to 0.8 × 0.8 m including bumpers. Set `--robot-length` and `--robot-width` for a different robot. Poses must clear the gamepieces, field boundary, and conservative static obstacle bounds. The first run caches field bounds and piece contact heights under `runtime/`. Subsequent runs reuse that cache without loading meshes.
+
+To require at least two pieces in every left COS camera view and render the resulting layouts:
+
+```sh
+./.venv/bin/python -m frc_sim generate-layouts --batch-size 5 --num-batches 10 --min-visible 2 --seed 2023 --output runtime/cos-left-layouts
+./.venv/bin/python -m frc_sim render-layouts --layouts runtime/cos-left-layouts --output runtime/cos-left-renders
+```
+
+`--min-visible` defaults to zero. The filter uses the left camera calibration and a 70° horizontal × 47.3° vertical field of view. It checks sampled mesh points against conservative occlusion bounds, so it may undercount partially visible pieces. The renderer writes `batch_0/layout.json`, `batch_0/frame_0.png`, and matching scene JSON sidecars, with one numbered directory per layout.
 
 ## Validation
 
