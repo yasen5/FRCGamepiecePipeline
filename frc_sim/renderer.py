@@ -13,7 +13,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from .camera import camera_pose, inspection_pose, projection, transform
-from .model import Scene, scene_json
+from .model import DEFAULT_CONE_PATH, GamepiecePlacement, Scene, scene_json
 
 
 class FieldRotation(BaseModel):
@@ -45,9 +45,15 @@ class Renderer:
         self.camera_size = (0, 0)
 
     def rebuild(self, state: Scene) -> None:
+        root = Path(state.field_dir)
+        stock_gamepieces = {Path(DEFAULT_CONE_PATH).resolve(), (root / 'model_0.glb').resolve(),
+                            (root / 'model_1.glb').resolve()}
+        matte_pieces = [piece.gamepiece is not None or Path(piece.path).resolve() in stock_gamepieces
+                        for piece in state.pieces]
         static = state.model_copy(deep=True)
-        for piece in static.pieces:
-            piece.gamepiece = None  # Placement metadata does not change the GPU mesh.
+        for piece, matte in zip(static.pieces, matte_pieces):
+            # Only the gamepiece tag affects the material, not the placement settings.
+            piece.gamepiece = GamepiecePlacement() if matte else None
             piece.position = (0, 0, 0)
             piece.rotation = (0, 0, 0)
         signature = static.model_dump_json(exclude={'robot_xy_heading', 'calibration', 'distortion',
@@ -58,7 +64,6 @@ class Renderer:
         self.camera = None
         self.camera_size = (0, 0)
         self.actors = []
-        root = Path(state.field_dir)
         config = FieldConfig.model_validate_json((root / 'config.json').read_text())
         field_pose = transform((config.widthInches*.0254/2, config.heightInches*.0254/2, 0), (0, 0, 180))
         for rotation in config.rotations:
@@ -68,21 +73,40 @@ class Renderer:
         # Remove staged objects by GLB node name while preserving scene hierarchy/materials.
         import hashlib
         cache = Path('runtime') / ('field-' + hashlib.sha256(
-            (root / 'model.glb').read_bytes() + (root / 'config.json').read_bytes()).hexdigest()[:16] + '.glb')
+            (root / 'model.glb').read_bytes() + (root / 'config.json').read_bytes()
+            + b'matte-carpet-and-gamepieces-v1').hexdigest()[:16] + '.glb')
         if not cache.exists():
             import trimesh
+            from trimesh.visual.material import PBRMaterial
+            from trimesh.visual.texture import TextureVisuals
+
             model = trimesh.load_scene(str(root / 'model.glb'))
             staged = {name for piece in config.gamePieces for name in piece.stagedObjects}
             for node in list(model.graph.nodes_geometry):
                 if node in staged:
                     model.graph.transforms.remove_node(node)
+            matte_meshes = {'Carpet (FE-2023-01)', 'Traffic Cone v2', 'Cube v3'}
+            for name, mesh in model.geometry.items():
+                # Trimesh appends numeric suffixes to duplicate mesh names.
+                base, _, suffix = name.rpartition('_')
+                if name not in matte_meshes and not (suffix.isdecimal() and base in matte_meshes):
+                    continue
+                visual = mesh.visual
+                if isinstance(visual, TextureVisuals) and isinstance(visual.material, PBRMaterial):
+                    # Other field meshes can share the original material.
+                    material = visual.material.copy()
+                    material.metallicFactor = 0.0
+                    material.roughnessFactor = 1.0
+                    material.metallicRoughnessTexture = None
+                    visual.material = material
             cache.parent.mkdir(parents=True, exist_ok=True)
             model.export(str(cache))
         self.add_mesh(cache, field_pose, 1, None)
-        for piece in state.pieces:
-            self.add_mesh(Path(piece.path), transform(piece.position, piece.rotation) @
+        for piece, matte in zip(state.pieces, matte_pieces):
+            path = Path(piece.path)
+            self.add_mesh(path, transform(piece.position, piece.rotation) @
                           transform((0, 0, 0), piece.import_rotation), piece.scale,
-                          piece.color if Path(piece.path).suffix.lower() == '.stl' else None)
+                          piece.color if path.suffix.lower() == '.stl' else None, matte=matte)
         self.scene.set_ambient_light(state.ambient)
         for light in state.lights:
             if light.kind != 'point' and np.linalg.norm(light.direction) < 1e-8:
@@ -106,7 +130,7 @@ class Renderer:
         self.signature = signature
 
     def add_mesh(self, path: Path, pose: NDArray[np.float64], scale: float,
-                 color: tuple[float, float, float] | None) -> None:
+                 color: tuple[float, float, float] | None, *, matte: bool = False) -> None:
         if path.suffix.lower() not in {'.glb', '.stl'} or not path.is_file():
             raise ValueError(f'Expected an existing GLB/STL: {path}')
         builder = self.scene.create_actor_builder()
@@ -116,6 +140,20 @@ class Renderer:
             material.base_color = [*color, 1]
         builder.add_visual_from_file(str(path), scale=[scale]*3, material=material)
         actor = builder.build_kinematic()
+        if matte:
+            from sapien.render import RenderBodyComponent
+
+            for component in actor.components:
+                if isinstance(component, RenderBodyComponent):
+                    for shape in component.render_shapes:
+                        for part in shape.parts:
+                            part_material = part.material
+                            # SAPIEN accepts None to clear textures despite the stub annotations.
+                            part_material.metallic_texture = None  # pyright: ignore[reportAttributeAccessIssue]
+                            part_material.roughness_texture = None  # pyright: ignore[reportAttributeAccessIssue]
+                            part_material.metallic = 0.0
+                            part_material.roughness = 1.0
+                            part_material.specular = 0.0
         actor.set_pose(self.api.Pose(pose))
         self.actors.append(actor)
 
